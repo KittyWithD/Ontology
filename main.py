@@ -1,14 +1,10 @@
-from owlready2 import *
-from typing import List, Dict, Set
-import math
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 import threading
-import sqlite3
-import datetime
 import json
 from dataclasses import dataclass
 from enum import Enum
+from Analyzer import *
 
 class MetricType(Enum):
     DISTANCE = "distance"
@@ -37,74 +33,7 @@ class ComparisonResult:
 class DatabaseManager:
     def __init__(self, db_path="ontology_comparisons.db"):
         self.db_path = db_path
-        self.init_database()
-
-    def init_database(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS comparisons (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ontology_name TEXT NOT NULL,
-            concept1 TEXT NOT NULL,
-            concept2 TEXT NOT NULL,
-            lcs TEXT NOT NULL,
-            graph_distance REAL,
-            wu_palmer REAL,
-            lee REAL,
-            resnik REAL,
-            lin REAL,
-            jiang_conrath REAL,
-            schlicker REAL,
-            meng REAL,
-            edge_based REAL,
-            batet REAL,
-            average_similarity REAL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            notes TEXT
-        )
-        ''')
-
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            comparison_id INTEGER,
-            metric_name TEXT NOT NULL,
-            metric_value REAL NOT NULL,
-            metric_type TEXT NOT NULL,
-            interpretation TEXT,
-            FOREIGN KEY (comparison_id) REFERENCES comparisons (id)
-        )
-        ''')
-
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ontologies (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            file_path TEXT NOT NULL,
-            concept_count INTEGER,
-            loaded_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-            last_used DATETIME
-        )
-        ''')
-
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS favorites (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            comparison_id INTEGER,
-            tag TEXT,
-            added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (comparison_id) REFERENCES comparisons (id)
-        )
-        ''')
-
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_comparisons_concepts ON comparisons(concept1, concept2)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_comparisons_timestamp ON comparisons(timestamp)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_metrics_comparison ON metrics(comparison_id)')
-
-        conn.commit()
-        conn.close()
+        #self.init_database()
 
     def save_comparison(self, result: ComparisonResult, notes: str = ""):
         conn = sqlite3.connect(self.db_path)
@@ -204,42 +133,6 @@ class DatabaseManager:
         conn.close()
         return dict(result) if result else None
 
-    def search_comparisons(self, concept_name: str = None, ontology_name: str = None,
-                           date_from: str = None, date_to: str = None):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        query = '''
-        SELECT * FROM comparisons 
-        WHERE 1=1
-        '''
-        params = []
-
-        if concept_name:
-            query += ' AND (concept1 LIKE ? OR concept2 LIKE ?)'
-            params.extend([f'%{concept_name}%', f'%{concept_name}%'])
-
-        if ontology_name:
-            query += ' AND ontology_name LIKE ?'
-            params.append(f'%{ontology_name}%')
-
-        if date_from:
-            query += ' AND timestamp >= ?'
-            params.append(date_from)
-
-        if date_to:
-            query += ' AND timestamp <= ?'
-            params.append(date_to)
-
-        query += ' ORDER BY timestamp DESC'
-
-        cursor.execute(query, params)
-        results = cursor.fetchall()
-        conn.close()
-
-        return [dict(row) for row in results]
-
     def add_to_favorites(self, comparison_id: int, tag: str = ""):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -336,379 +229,10 @@ class DatabaseManager:
         import shutil
         shutil.copy2(self.db_path, backup_path)
 
-
-class OntologySimilarityAnalyzer:
-
-    def __init__(self, ontology_path: str):
-        self.ontology = get_ontology(ontology_path).load()
-        self.ontology_path = ontology_path
-
-        self.classes = list(self.ontology.classes())
-        self.class_names = {cls.name.lower(): cls for cls in self.classes}
-
-        self.parents_cache = {}
-        self.depth_cache = {}
-        self.children_cache = {}
-        self._build_caches()
-
-        self.descendants_cache = {}
-
-    def _build_caches(self):
-        for cls in self.classes:
-            ancestors = set(cls.ancestors())
-            ancestors.discard(cls)
-            self.parents_cache[cls] = ancestors
-
-            children = set(cls.subclasses())
-            self.children_cache[cls] = children
-
-            self.depth_cache[cls] = self._compute_depth(cls)
-
-    def _compute_depth(self, cls) -> int:
-        if cls == owl.Thing:
-            return 0
-
-        parents = cls.is_a
-        direct_parents = [p for p in parents if isinstance(p, owlready2.ThingClass)]
-
-        if not direct_parents:
-            return 1
-
-        min_depth = float('inf')
-        for parent in direct_parents:
-            if parent not in self.depth_cache:
-                self.depth_cache[parent] = self._compute_depth(parent)
-            min_depth = min(min_depth, self.depth_cache[parent])
-
-        return min_depth + 1
-
-    def get_concepts_list(self) -> List[str]:
-        return [cls.name for cls in self.classes]
-
-    def find_concept(self, concept_name: str):
-        for cls in self.classes:
-            if cls.name.lower() == concept_name.lower():
-                return cls
-
-        matches = []
-        for cls in self.classes:
-            if concept_name.lower() in cls.name.lower():
-                matches.append(cls)
-
-        if len(matches) == 1:
-            return matches[0]
-        elif len(matches) > 1:
-            return matches[0]
-
-        return None
-
-    def find_least_common_subsumer(self, cls1, cls2):
-        if cls1 == cls2:
-            return cls1
-
-        ancestors1 = self.parents_cache[cls1].copy()
-        ancestors1.add(cls1)
-        ancestors2 = self.parents_cache[cls2].copy()
-        ancestors2.add(cls2)
-
-        common_ancestors = ancestors1.intersection(ancestors2)
-
-        if not common_ancestors:
-            return owl.Thing
-
-        lcs = max(common_ancestors, key=lambda x: self.depth_cache.get(x, 0))
-        return lcs
-
-    def _get_descendants(self, cls) -> Set:
-        if cls in self.descendants_cache:
-            return self.descendants_cache[cls]
-
-        descendants = set()
-        queue = [cls]
-
-        while queue:
-            current = queue.pop(0)
-            if current not in descendants:
-                descendants.add(current)
-                for child in self.children_cache.get(current, []):
-                    if child not in descendants:
-                        queue.append(child)
-
-        self.descendants_cache[cls] = descendants
-        return descendants
-
-    def graph_distance(self, cls1, cls2) -> float:
-        if cls1 == cls2:
-            return 0.0
-
-        lcs = self.find_least_common_subsumer(cls1, cls2)
-        dist1 = self._distance_to_ancestor(cls1, lcs)
-        dist2 = self._distance_to_ancestor(cls2, lcs)
-
-        return dist1 + dist2
-
-    def _distance_to_ancestor(self, cls, ancestor) -> int:
-        if cls == ancestor:
-            return 0
-
-        visited = set()
-        queue = [(cls, 0)]
-
-        while queue:
-            current, distance = queue.pop(0)
-
-            if current == ancestor:
-                return distance
-
-            if current in visited:
-                continue
-            visited.add(current)
-            parents = [p for p in current.is_a if isinstance(p, owlready2.ThingClass)]
-            for parent in parents:
-                queue.append((parent, distance + 1))
-
-            children = current.subclasses()
-            for child in children:
-                queue.append((child, distance + 1))
-
-        return float('inf')
-
-    def wu_palmer_similarity(self, cls1, cls2) -> float:
-        if cls1 == cls2:
-            return 1.0
-
-        lcs = self.find_least_common_subsumer(cls1, cls2)
-
-        depth_lcs = self.depth_cache.get(lcs, 0)
-        depth1 = self.depth_cache.get(cls1, 0)
-        depth2 = self.depth_cache.get(cls2, 0)
-
-        if depth_lcs == 0:
-            return 0.0
-
-        similarity = (2.0 * depth_lcs) / (depth1 + depth2)
-        return min(1.0, max(0.0, similarity))
-
-    def lee_similarity(self, cls1, cls2) -> float:
-        if cls1 == cls2:
-            return 1.0
-
-        lcs = self.find_least_common_subsumer(cls1, cls2)
-        depth_lcs = self.depth_cache.get(lcs, 0)
-
-        max_depth = max(self.depth_cache.values())
-
-        if max_depth == 0:
-            return 0.0
-
-        return depth_lcs / max_depth
-
-    def resnik_similarity(self, cls1, cls2, ic_values: Dict = None) -> float:
-        if cls1 == cls2:
-            if ic_values and cls1 in ic_values:
-                return ic_values[cls1]
-            return 1.0
-
-        lcs = self.find_least_common_subsumer(cls1, cls2)
-
-        if ic_values and lcs in ic_values:
-            return ic_values[lcs]
-
-        depth_lcs = self.depth_cache.get(lcs, 0)
-        max_depth = max(self.depth_cache.values())
-
-        if max_depth == 0:
-            return 0.0
-
-        return depth_lcs / max_depth
-
-    def lin_similarity(self, cls1, cls2, ic_values: Dict = None) -> float:
-        if cls1 == cls2:
-            return 1.0
-
-        lcs = self.find_least_common_subsumer(cls1, cls2)
-
-        if ic_values:
-            ic1 = ic_values.get(cls1, 0)
-            ic2 = ic_values.get(cls2, 0)
-            ic_lcs = ic_values.get(lcs, 0)
-
-            if ic1 + ic2 == 0:
-                return 0.0
-
-            return (2 * ic_lcs) / (ic1 + ic2)
-        else:
-            depth_lcs = self.depth_cache.get(lcs, 0)
-            depth1 = self.depth_cache.get(cls1, 0)
-            depth2 = self.depth_cache.get(cls2, 0)
-
-            if depth1 + depth2 == 0:
-                return 0.0
-
-            return (2 * depth_lcs) / (depth1 + depth2)
-
-    def jiang_conrath_distance(self, cls1, cls2, ic_values: Dict = None) -> float:
-        if cls1 == cls2:
-            return 0.0
-
-        lcs = self.find_least_common_subsumer(cls1, cls2)
-
-        if ic_values:
-            ic1 = ic_values.get(cls1, 0)
-            ic2 = ic_values.get(cls2, 0)
-            ic_lcs = ic_values.get(lcs, 0)
-        else:
-            max_depth = max(self.depth_cache.values())
-            ic1 = self.depth_cache.get(cls1, 0) / max_depth if max_depth > 0 else 0
-            ic2 = self.depth_cache.get(cls2, 0) / max_depth if max_depth > 0 else 0
-            ic_lcs = self.depth_cache.get(lcs, 0) / max_depth if max_depth > 0 else 0
-
-        distance = ic1 + ic2 - (2 * ic_lcs)
-        return max(0.0, distance)
-
-    def schlicker_similarity(self, cls1, cls2, ic_values: Dict = None) -> float:
-        if cls1 == cls2:
-            return 1.0
-
-        lcs = self.find_least_common_subsumer(cls1, cls2)
-
-        if ic_values:
-            ic_lcs = ic_values.get(lcs, 0)
-            ic1 = ic_values.get(cls1, 0)
-            ic2 = ic_values.get(cls2, 0)
-        else:
-            max_depth = max(self.depth_cache.values())
-            ic_lcs = self.depth_cache.get(lcs, 0) / max_depth if max_depth > 0 else 0
-            ic1 = self.depth_cache.get(cls1, 0) / max_depth if max_depth > 0 else 0
-            ic2 = self.depth_cache.get(cls2, 0) / max_depth if max_depth > 0 else 0
-
-        if ic1 == 0 or ic2 == 0:
-            return 0.0
-
-        similarity = (2 * ic_lcs) / (ic1 + ic2) * (1 - math.exp(-ic_lcs))
-        return min(1.0, max(0.0, similarity))
-
-    def meng_similarity(self, cls1, cls2) -> float:
-        if cls1 == cls2:
-            return 1.0
-
-        ancestors1 = self.parents_cache[cls1].copy()
-        ancestors1.add(cls1)
-        ancestors2 = self.parents_cache[cls2].copy()
-        ancestors2.add(cls2)
-        common_ancestors = ancestors1.intersection(ancestors2)
-
-        descendants1 = self._get_descendants(cls1)
-        descendants2 = self._get_descendants(cls2)
-        common_descendants = descendants1.intersection(descendants2)
-
-        all_nodes = set(self.classes)
-
-        if len(all_nodes) == 0:
-            return 0.0
-
-        ancestor_similarity = len(common_ancestors) / len(all_nodes)
-        descendant_similarity = len(common_descendants) / len(all_nodes)
-
-        similarity = 0.6 * ancestor_similarity + 0.4 * descendant_similarity
-
-        return min(1.0, max(0.0, similarity))
-
-    def edge_based_similarity(self, cls1, cls2) -> float:
-        if cls1 == cls2:
-            return 1.0
-
-        distance = self.graph_distance(cls1, cls2)
-
-        if distance == float('inf'):
-            return 0.0
-
-        max_distance = 0
-        for c1 in self.classes:
-            for c2 in self.classes:
-                if c1 != c2:
-                    d = self.graph_distance(c1, c2)
-                    if d != float('inf'):
-                        max_distance = max(max_distance, d)
-
-        if max_distance == 0:
-            return 0.0
-
-        similarity = 1.0 - (distance / max_distance)
-
-        return max(0.0, min(1.0, similarity))
-
-    def batet_similarity(self, cls1, cls2) -> float:
-        if cls1 == cls2:
-            return 1.0
-
-        ancestors1 = self.parents_cache[cls1].copy()
-        ancestors1.add(cls1)
-        ancestors2 = self.parents_cache[cls2].copy()
-        ancestors2.add(cls2)
-
-        union = ancestors1.union(ancestors2)
-        intersection = ancestors1.intersection(ancestors2)
-
-        if len(union) == 0:
-            return 0.0
-
-        similarity = 1 - (math.log2(len(intersection) + 1) /
-                          math.log2(len(union) + 1))
-
-        return max(0.0, min(1.0, similarity))
-
-    def compute_all_metrics(self, concept1_name: str, concept2_name: str,
-                            ic_values: Dict = None) -> ComparisonResult:
-        concept1 = self.find_concept(concept1_name)
-        concept2 = self.find_concept(concept2_name)
-
-        if not concept1:
-            raise ValueError(f"Концепт '{concept1_name}' не найден в онтологии")
-        if not concept2:
-            raise ValueError(f"Концепт '{concept2_name}' не найден в онтологии")
-
-        graph_distance = self.graph_distance(concept1, concept2)
-        wu_palmer = self.wu_palmer_similarity(concept1, concept2)
-        lee = self.lee_similarity(concept1, concept2)
-        resnik = self.resnik_similarity(concept1, concept2, ic_values)
-        lin = self.lin_similarity(concept1, concept2, ic_values)
-        jiang_conrath = self.jiang_conrath_distance(concept1, concept2, ic_values)
-        schlicker = self.schlicker_similarity(concept1, concept2, ic_values)
-        meng = self.meng_similarity(concept1, concept2)
-        edge_based = self.edge_based_similarity(concept1, concept2)
-        batet = self.batet_similarity(concept1, concept2)
-
-        similarity_metrics = [wu_palmer, lee, resnik, lin, schlicker, meng, edge_based, batet]
-        average_similarity = sum(similarity_metrics) / len(similarity_metrics)
-
-        lcs = self.find_least_common_subsumer(concept1, concept2)
-
-        result = ComparisonResult(
-            concept1=concept1.name,
-            concept2=concept2.name,
-            lcs=lcs.name,
-            graph_distance=graph_distance,
-            wu_palmer=wu_palmer,
-            lee=lee,
-            resnik=resnik,
-            lin=lin,
-            jiang_conrath=jiang_conrath,
-            schlicker=schlicker,
-            meng=meng,
-            edge_based=edge_based,
-            batet=batet,
-            average_similarity=average_similarity,
-            ontology_name=self.ontology.name,
-            timestamp=datetime.datetime.now().isoformat()
-        )
-
-        return result
-
 class OntologyGUI:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Анализатор семантической близости концептов с БД")
+        self.root.title("Анализатор семантической близости концептов")
         self.root.geometry("1400x900")
 
         self.analyzer = None
@@ -729,7 +253,7 @@ class OntologyGUI:
 
         title_label = ttk.Label(
             main_frame,
-            text="Анализатор семантической близости концептов с SQLite БД",
+            text="Анализатор семантической близости концептов",
             font=("Arial", 16, "bold")
         )
         title_label.grid(row=0, column=0, columnspan=4, pady=(0, 10))
@@ -794,17 +318,9 @@ class OntologyGUI:
         self.notebook.add(history_frame, text="История сравнений")
         self.setup_history_tab(history_frame)
 
-        search_frame = ttk.Frame(self.notebook)
-        self.notebook.add(search_frame, text="Поиск в БД")
-        self.setup_search_tab(search_frame)
-
         favorites_frame = ttk.Frame(self.notebook)
         self.notebook.add(favorites_frame, text="Избранное")
         self.setup_favorites_tab(favorites_frame)
-
-        stats_frame = ttk.Frame(self.notebook)
-        self.notebook.add(stats_frame, text="Статистика")
-        self.setup_stats_tab(stats_frame)
 
         list_frame = ttk.Frame(self.notebook)
         self.notebook.add(list_frame, text="Концепты онтологии")
@@ -840,8 +356,6 @@ class OntologyGUI:
 
         ttk.Button(btn_frame, text="Экспорт в JSON", command=self.export_to_json).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Добавить в избранное", command=self.add_to_favorites).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Создать резервную копию БД", command=self.backup_database).pack(side=tk.LEFT,
-                                                                                                    padx=5)
 
     def setup_history_tab(self, parent):
         control_frame = ttk.Frame(parent)
@@ -892,74 +406,6 @@ class OntologyGUI:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(1, weight=1)
 
-    def setup_search_tab(self, parent):
-        search_frame = ttk.LabelFrame(parent, text="Параметры поиска", padding="10")
-        search_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
-
-        ttk.Label(search_frame, text="Концепт:").grid(row=0, column=0, sticky=tk.W)
-        self.search_concept_var = tk.StringVar()
-        ttk.Entry(search_frame, textvariable=self.search_concept_var, width=30).grid(
-            row=0, column=1, sticky=tk.W, padx=(5, 20)
-        )
-
-        ttk.Label(search_frame, text="Онтология:").grid(row=0, column=2, sticky=tk.W)
-        self.search_ontology_var = tk.StringVar()
-        ttk.Entry(search_frame, textvariable=self.search_ontology_var, width=30).grid(
-            row=0, column=3, sticky=tk.W, padx=(5, 0)
-        )
-
-        ttk.Label(search_frame, text="С даты (YYYY-MM-DD):").grid(row=1, column=0, sticky=tk.W, pady=(10, 0))
-        self.search_date_from_var = tk.StringVar()
-        ttk.Entry(search_frame, textvariable=self.search_date_from_var, width=15).grid(
-            row=1, column=1, sticky=tk.W, padx=(5, 20), pady=(10, 0)
-        )
-
-        ttk.Label(search_frame, text="По дату (YYYY-MM-DD):").grid(row=1, column=2, sticky=tk.W, pady=(10, 0))
-        self.search_date_to_var = tk.StringVar()
-        ttk.Entry(search_frame, textvariable=self.search_date_to_var, width=15).grid(
-            row=1, column=3, sticky=tk.W, padx=(5, 0), pady=(10, 0)
-        )
-
-        btn_frame = ttk.Frame(search_frame)
-        btn_frame.grid(row=2, column=0, columnspan=4, pady=(10, 0))
-
-        ttk.Button(btn_frame, text="Искать", command=self.search_comparisons).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Очистить", command=self.clear_search).pack(side=tk.LEFT, padx=5)
-
-        columns = ('id', 'timestamp', 'ontology', 'concept1', 'concept2', 'avg_similarity')
-        self.tree_search = ttk.Treeview(parent, columns=columns, show='headings', height=12)
-
-        for col in columns:
-            if col == 'id':
-                self.tree_search.heading(col, text='ID')
-                self.tree_search.column(col, width=50)
-            elif col == 'timestamp':
-                self.tree_search.heading(col, text='Дата/время')
-                self.tree_search.column(col, width=150)
-            elif col == 'ontology':
-                self.tree_search.heading(col, text='Онтология')
-                self.tree_search.column(col, width=150)
-            elif col == 'concept1':
-                self.tree_search.heading(col, text='Концепт 1')
-                self.tree_search.column(col, width=120)
-            elif col == 'concept2':
-                self.tree_search.heading(col, text='Концепт 2')
-                self.tree_search.column(col, width=120)
-            elif col == 'avg_similarity':
-                self.tree_search.heading(col, text='Сред. сходство')
-                self.tree_search.column(col, width=100)
-
-        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=self.tree_search.yview)
-        self.tree_search.configure(yscrollcommand=scrollbar.set)
-
-        self.tree_search.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        scrollbar.grid(row=1, column=1, sticky=(tk.N, tk.S))
-
-        self.tree_search.bind('<Double-Button-1>', self.view_search_item)
-
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(1, weight=1)
-
     def setup_favorites_tab(self, parent):
         columns = ('id', 'concept1', 'concept2', 'avg_similarity', 'tag', 'added_date')
         self.tree_favorites = ttk.Treeview(parent, columns=columns, show='headings', height=15)
@@ -994,8 +440,6 @@ class OntologyGUI:
         btn_frame.grid(row=1, column=0, columnspan=2, pady=(10, 0))
 
         ttk.Button(btn_frame, text="Обновить", command=self.load_favorites).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Удалить из избранного", command=self.remove_from_favorites).pack(side=tk.LEFT,
-                                                                                                     padx=5)
 
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
@@ -1006,9 +450,6 @@ class OntologyGUI:
 
         btn_frame = ttk.Frame(parent)
         btn_frame.grid(row=1, column=0, pady=(10, 0))
-
-        ttk.Button(btn_frame, text="Обновить статистику", command=self.load_statistics).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Экспорт статистики", command=self.export_stats).pack(side=tk.LEFT, padx=5)
 
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
@@ -1023,10 +464,6 @@ class OntologyGUI:
 
         btn_frame = ttk.Frame(parent)
         btn_frame.grid(row=1, column=0, columnspan=2, pady=(10, 0))
-
-        ttk.Button(btn_frame, text="Копировать выбранное", command=self.copy_selected_concept).pack(side=tk.LEFT,
-                                                                                                    padx=5)
-        ttk.Button(btn_frame, text="Обновить список", command=self.update_concepts_list).pack(side=tk.LEFT, padx=5)
 
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
@@ -1189,7 +626,6 @@ class OntologyGUI:
 
         self.tree_metrics.tag_configure('header', font=('Arial', 10, 'bold'))
         self.tree_metrics.tag_configure('spacer', foreground='white')
-
         self.notebook.select(0)
 
     def interpret_distance(self, distance):
@@ -1255,7 +691,6 @@ class OntologyGUI:
             messagebox.showinfo("Успех", f"Результаты сохранены в БД с ID: {comparison_id}")
             self.status_var.set(f"Сохранено в БД с ID: {comparison_id}")
             self.load_history()
-
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось сохранить в БД: {str(e)}")
 
@@ -1279,7 +714,6 @@ class OntologyGUI:
                 ))
 
             self.status_var.set(f"Загружено {len(history)} записей из истории")
-
         except ValueError:
             messagebox.showerror("Ошибка", "Лимит должен быть числом")
         except Exception as e:
@@ -1299,52 +733,6 @@ class OntologyGUI:
 
         self.view_comparison_details(comparison_id)
 
-    def search_comparisons(self):
-        try:
-            results = self.db_manager.search_comparisons(
-                concept_name=self.search_concept_var.get() if self.search_concept_var.get() else None,
-                ontology_name=self.search_ontology_var.get() if self.search_ontology_var.get() else None,
-                date_from=self.search_date_from_var.get() if self.search_date_from_var.get() else None,
-                date_to=self.search_date_to_var.get() if self.search_date_to_var.get() else None
-            )
-
-            for item in self.tree_search.get_children():
-                self.tree_search.delete(item)
-
-            for item in results:
-                self.tree_search.insert('', tk.END, values=(
-                    item['id'],
-                    item['timestamp'],
-                    item['ontology_name'],
-                    item['concept1'],
-                    item['concept2'],
-                    f"{item['average_similarity']:.4f}"
-                ))
-
-            self.status_var.set(f"Найдено {len(results)} записей")
-
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Ошибка поиска: {str(e)}")
-
-    def clear_search(self):
-        self.search_concept_var.set("")
-        self.search_ontology_var.set("")
-        self.search_date_from_var.set("")
-        self.search_date_to_var.set("")
-
-        for item in self.tree_search.get_children():
-            self.tree_search.delete(item)
-
-    def view_search_item(self, event):
-        selection = self.tree_search.selection()
-        if not selection:
-            return
-
-        item = self.tree_search.item(selection[0])
-        comparison_id = item['values'][0]
-
-        self.view_comparison_details(comparison_id)
-
     def view_comparison_details(self, comparison_id):
         try:
             comparison = self.db_manager.get_comparison_by_id(comparison_id)
@@ -1359,21 +747,17 @@ class OntologyGUI:
             text_widget = scrolledtext.ScrolledText(details_window, wrap=tk.WORD, width=70, height=30)
             text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-            text = f"ДЕТАЛИ СРАВНЕНИЯ ID: {comparison_id}\n"
-            text += "=" * 60 + "\n\n"
+            text = f"ДЕТАЛИ СРАВНЕНИЯ ID: {comparison_id}\n\n"
 
             text += f"Онтология: {comparison['ontology_name']}\n"
             text += f"Концепт 1: {comparison['concept1']}\n"
             text += f"Концепт 2: {comparison['concept2']}\n"
-            text += f"LCS: {comparison['lcs']}\n"
-            text += f"Дата/время: {comparison['timestamp']}\n"
+            text += f"LCS: {comparison['lcs']}\n\n"
 
             if comparison.get('notes'):
                 text += f"Примечания: {comparison['notes']}\n"
 
-            text += "\n" + "=" * 60 + "\n"
-            text += "МЕТРИКИ:\n"
-            text += "=" * 60 + "\n\n"
+            text += "МЕТРИКИ:\n\n"
 
             for metric in comparison.get('metrics', []):
                 text += f"{metric['metric_name']}: {metric['metric_value']:.4f}\n"
@@ -1402,7 +786,6 @@ class OntologyGUI:
                 ))
 
             self.status_var.set(f"Загружено {len(favorites)} избранных")
-
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось загрузить избранное: {str(e)}")
 
@@ -1411,121 +794,24 @@ class OntologyGUI:
             messagebox.showerror("Ошибка", "Сначала сохраните сравнение в БД")
             return
 
-        tag = tk.simpledialog.askstring(
-            "Добавить в избранное",
-            "Введите тег (опционально):",
-            parent=self.root
-        )
-
         try:
-            self.db_manager.add_to_favorites(self.current_comparison_id, tag or "")
+            self.db_manager.add_to_favorites(self.current_comparison_id)
             messagebox.showinfo("Успех", "Добавлено в избранное")
             self.load_favorites()
-
         except Exception as e:
             messagebox.showerror("Ошибка", f"Не удалось добавить в избранное: {str(e)}")
-
-    def remove_from_favorites(self):
-        selection = self.tree_favorites.selection()
-        if not selection:
-            messagebox.showerror("Ошибка", "Выберите запись для удаления")
-            return
-
-        item = self.tree_favorites.item(selection[0])
-        comparison_id = item['values'][0]
-
-        messagebox.showinfo("Информация",
-                            "В данной реализации удаление из избранного требует\n"
-                            "дополнительной реализации в классе DatabaseManager")
-
-    def load_statistics(self):
-        try:
-            stats = self.db_manager.get_statistics()
-
-            self.stats_text.delete(1.0, tk.END)
-
-            text = "СТАТИСТИКА БАЗЫ ДАННЫХ\n"
-            text += "=" * 50 + "\n\n"
-
-            text += f"Всего сравнений: {stats.get('total_comparisons', 0)}\n"
-            text += f"Уникальных концептов: {stats.get('unique_concepts', 0)}\n"
-            text += f"Загруженных онтологий: {stats.get('total_ontologies', 0)}\n"
-            text += f"Последнее сравнение: {stats.get('last_comparison', 'Нет данных')}\n\n"
-
-            if 'most_compared' in stats:
-                most = stats['most_compared']
-                text += f"Самое частое сравнение:\n"
-                text += f"  {most['concept1']} ↔ {most['concept2']}\n"
-                text += f"  Количество сравнений: {most['count']}\n"
-
-            self.stats_text.insert(tk.END, text)
-
-            self.status_var.set("Статистика загружена")
-
-        except Exception as e:
-            messagebox.showerror("Ошибка", f"Не удалось загрузить статистику: {str(e)}")
-
-    def export_stats(self):
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-        )
-
-        if file_path:
-            try:
-                stats = self.db_manager.get_statistics()
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write("СТАТИСТИКА БАЗЫ ДАННЫХ\n")
-                    f.write("=" * 50 + "\n\n")
-
-                    for key, value in stats.items():
-                        if isinstance(value, dict):
-                            f.write(f"{key}:\n")
-                            for k, v in value.items():
-                                f.write(f"  {k}: {v}\n")
-                        else:
-                            f.write(f"{key}: {value}\n")
-
-                messagebox.showinfo("Успех", f"Статистика экспортирована в {file_path}")
-
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось экспортировать: {str(e)}")
 
     def export_to_json(self):
         file_path = filedialog.asksaveasfilename(
             defaultextension=".json",
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
         )
-
         if file_path:
             try:
                 self.db_manager.export_to_json(file_path)
                 messagebox.showinfo("Успех", f"Данные экспортированы в {file_path}")
-
             except Exception as e:
                 messagebox.showerror("Ошибка", f"Не удалось экспортировать: {str(e)}")
-
-    def backup_database(self):
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".db",
-            filetypes=[("Database files", "*.db"), ("All files", "*.*")]
-        )
-
-        if file_path:
-            try:
-                self.db_manager.backup_database(file_path)
-                messagebox.showinfo("Успех", f"Резервная копия создана: {file_path}")
-
-            except Exception as e:
-                messagebox.showerror("Ошибка", f"Не удалось создать резервную копию: {str(e)}")
-
-    def copy_selected_concept(self):
-        selection = self.concepts_listbox.curselection()
-        if selection:
-            concept = self.concepts_listbox.get(selection[0])
-            self.root.clipboard_clear()
-            self.root.clipboard_append(concept)
-            self.status_var.set(f"Скопировано: {concept}")
 
     def clear_results(self):
         for item in self.tree_metrics.get_children():
