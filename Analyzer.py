@@ -5,7 +5,6 @@ import datetime
 
 from main import ComparisonResult
 
-
 class OntologySimilarityAnalyzer:
 
     def __init__(self, ontology_path: str):

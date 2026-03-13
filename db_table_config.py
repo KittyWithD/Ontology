@@ -38,7 +38,6 @@ def init_database(self):
         FOREIGN KEY (comparison_id) REFERENCES comparisons (id)
     )
     ''')
-
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS ontologies (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,7 +48,6 @@ def init_database(self):
         last_used DATETIME
     )
     ''')
-
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS favorites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

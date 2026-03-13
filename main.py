@@ -225,10 +225,6 @@ class DatabaseManager:
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2, default=str)
 
-    def backup_database(self, backup_path: str):
-        import shutil
-        shutil.copy2(self.db_path, backup_path)
-
 class OntologyGUI:
     def __init__(self):
         self.root = tk.Tk()
